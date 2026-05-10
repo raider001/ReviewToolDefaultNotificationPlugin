@@ -8,9 +8,11 @@ import com.kalynx.serverlessreviewtool.plugin.ReviewUpdateType;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoryChangePoller;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfig;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigLoader;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoriesFileWatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +59,8 @@ import java.util.concurrent.TimeUnit;
 public class DefaultNotificationPlugin extends NotificationPlugin {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DefaultNotificationPlugin.class);
+    private static final String CONFIG_PROPERTY = "srt.notification.config";
+    private static final String DEFAULT_CONFIG_NAME = "repositories.json";
 
     private final Map<String, PollerConfig> trackedRepositories = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> scheduledTasks = new java.util.concurrent.ConcurrentHashMap<>();
@@ -71,7 +75,7 @@ public class DefaultNotificationPlugin extends NotificationPlugin {
     );
 
     /**
-     * Initializes polling from configured repositories.
+     * Initializes polling from configured repositories and starts file watching.
      */
     @Override
     public void initialize() {
@@ -79,6 +83,60 @@ public class DefaultNotificationPlugin extends NotificationPlugin {
         PollerConfigLoader loader = new PollerConfigLoader();
         loader.loadConfigurations().forEach(this::startPolling);
         notifyRepositoriesUpdated();
+
+        Path configPath = resolveConfigPath();
+        RepositoriesFileWatcher watcher = new RepositoriesFileWatcher(
+            configPath,
+            this::onConfigurationChanged
+        );
+        watcher.start();
+    }
+
+    private void onConfigurationChanged(String newConfigContent) {
+        LOGGER.info("Configuration changed, reloading repositories");
+        PollerConfigLoader loader = new PollerConfigLoader();
+        List<PollerConfig> newConfigs = loader.loadConfigurations();
+
+        Map<String, PollerConfig> newConfigsByName = new java.util.HashMap<>();
+        for (PollerConfig config : newConfigs) {
+            newConfigsByName.put(config.repositoryName(), config);
+        }
+
+        for (String repoName : trackedRepositories.keySet()) {
+            if (!newConfigsByName.containsKey(repoName)) {
+                stopPolling(repoName);
+                LOGGER.info("Removed repository from polling: {}", repoName);
+            }
+        }
+
+        for (PollerConfig config : newConfigs) {
+            if (!trackedRepositories.containsKey(config.repositoryName())) {
+                startPolling(config);
+                LOGGER.info("Added new repository to polling: {}", config.repositoryName());
+            } else {
+                PollerConfig existing = trackedRepositories.get(config.repositoryName());
+                if (!existing.equals(config)) {
+                    stopPolling(config.repositoryName());
+                    startPolling(config);
+                    LOGGER.info("Updated polling for repository: {}", config.repositoryName());
+                }
+            }
+        }
+
+        notifyRepositoriesUpdated();
+    }
+
+    private void stopPolling(String repositoryName) {
+        ScheduledFuture<?> future = scheduledTasks.remove(repositoryName);
+        if (future != null) {
+            future.cancel(false);
+        }
+        trackedRepositories.remove(repositoryName);
+    }
+
+    private Path resolveConfigPath() {
+        String configured = System.getProperty(CONFIG_PROPERTY, DEFAULT_CONFIG_NAME);
+        return Path.of(configured).toAbsolutePath().normalize();
     }
 
     private void startPolling(PollerConfig config) {
