@@ -1,0 +1,6 @@
+com\kalynx\serverlessreviewtool\plugins\defaults\defaultnotificationplugin\PollerConfigLoader$RepositoriesConfig.class
+com\kalynx\serverlessreviewtool\plugins\defaults\DefaultNotificationPlugin.class
+com\kalynx\serverlessreviewtool\plugins\defaults\defaultnotificationplugin\PollerConfig.class
+com\kalynx\serverlessreviewtool\plugins\defaults\defaultnotificationplugin\PollerConfigLoader$RepositoryEntry.class
+com\kalynx\serverlessreviewtool\plugins\defaults\defaultnotificationplugin\RepositoryChangePoller.class
+com\kalynx\serverlessreviewtool\plugins\defaults\defaultnotificationplugin\PollerConfigLoader.class
