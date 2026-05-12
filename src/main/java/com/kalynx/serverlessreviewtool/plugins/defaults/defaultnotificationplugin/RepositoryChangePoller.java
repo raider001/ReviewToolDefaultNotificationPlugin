@@ -10,19 +10,29 @@ import java.util.function.Consumer;
  * Polls a repository for changes using git ls-remote.
  * Detects when repository refs have changed without cloning.
  * Designed to be scheduled by an executor service.
+ *
+ * <p>Initial ref state is seeded on the first scheduled execution, not in the constructor,
+ * so that constructing many pollers does not block the calling thread.
  */
 public class RepositoryChangePoller implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(RepositoryChangePoller.class);
     private final PollerConfig config;
     private final Consumer<PollerConfig> onChangeListener;
     private final Map<String, String> knownRefs = new HashMap<>();
+    private boolean initialized = false;
+
     public RepositoryChangePoller(PollerConfig config, Consumer<PollerConfig> onChangeListener) {
         this.config = config;
         this.onChangeListener = onChangeListener;
-        queryRepositoryState();
     }
+
     @Override
     public void run() {
+        if (!initialized) {
+            queryRepositoryState();
+            initialized = true;
+            return;
+        }
         checkForChanges();
     }
     public String getRepositoryName() {
