@@ -1,6 +1,7 @@
 package com.kalynx.serverlessreviewtool.plugins.defaults;
 
 import com.kalynx.serverlessreviewtool.plugin.NotificationPlugin;
+import com.kalynx.serverlessreviewtool.plugin.PluginPanel;
 import com.kalynx.serverlessreviewtool.plugin.RepositoryDescriptor;
 import com.kalynx.serverlessreviewtool.plugin.RepositoryListUpdate;
 import com.kalynx.serverlessreviewtool.plugin.ReviewListUpdate;
@@ -8,7 +9,9 @@ import com.kalynx.serverlessreviewtool.plugin.ReviewUpdateType;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoryChangePoller;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfig;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigLoader;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigSaver;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoriesFileWatcher;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.ui.RepositoriesManagementPanel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,6 +76,21 @@ public class DefaultNotificationPlugin extends NotificationPlugin {
                 return t;
             }
     );
+
+    /**
+     * Returns a {@link PluginPanel} contributing the repository management panel to the
+     * application menu at priority 50.
+     *
+     * @return plugin panel descriptor
+     */
+    @Override
+    public PluginPanel getUI() {
+        RepositoriesManagementPanel panel = new RepositoriesManagementPanel(
+            new PollerConfigLoader(),
+            new PollerConfigSaver()
+        );
+        return new PluginPanel("Repositories", panel, 50);
+    }
 
     /**
      * Initializes polling from configured repositories and starts file watching.
