@@ -1,8 +1,8 @@
 package com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.ui;
 
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfig;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigLoader;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigSaver;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfig;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfigLoader;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfigSaver;
 import com.kalynx.swingtheme.themedcomponents.ThemedButton;
 import com.kalynx.swingtheme.themedcomponents.ThemedConfirmDialog;
 import com.kalynx.swingtheme.themedcomponents.ThemedLabel;
@@ -19,59 +19,93 @@ import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import java.awt.*;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Panel for viewing and managing the repositories tracked by the default notification plugin.
- * Displays the current repository list and provides controls to add, edit, and remove entries.
- * Changes are persisted immediately to {@code repositories.json}.
+ * Panel for configuring the Central Indexer connection and the repositories to monitor.
+ *
+ * <p>The top section exposes the global indexer settings (URL, bearer token).
+ * Changes to those fields are persisted when each field loses focus.
+ *
+ * <p>The bottom section lists monitored repositories and provides controls to add, edit,
+ * and remove entries.  Changes to the list are persisted immediately.
+ *
+ * <p>An optional {@code onConfigChanged} callback supplied at construction time is invoked
+ * after every successful save, allowing the owning plugin to restart its SSE listeners.
  */
 public class RepositoriesManagementPanel extends ThemedPanel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(RepositoriesManagementPanel.class);
 
-    private final PollerConfigLoader loader;
-    private final PollerConfigSaver saver;
+    private final IndexerConfigLoader loader;
+    private final IndexerConfigSaver saver;
+    private final Runnable onConfigChanged;
 
-    private final List<PollerConfig> allRepositories = new ArrayList<>();
-    private final DefaultListModel<PollerConfig> listModel = new DefaultListModel<>();
-    private final ThemedList<PollerConfig> repositoryList = new ThemedList<>(listModel);
-    private final ThemedTextField searchField = new ThemedTextField(20);
-    private final ThemedButton addButton    = new ThemedButton("Add");
-    private final ThemedButton editButton   = new ThemedButton("Edit");
-    private final ThemedButton removeButton = new ThemedButton("Remove");
-    private final ThemedLabel statusLabel   = new ThemedLabel(" ");
+    private final ThemedTextField indexerUrlField  = new ThemedTextField(30);
+    private final ThemedTextField bearerTokenField = new ThemedTextField(30);
+
+    private final List<IndexerConfig.RepositoryEntry> allRepositories = new ArrayList<>();
+    private final DefaultListModel<IndexerConfig.RepositoryEntry> listModel = new DefaultListModel<>();
+    private final ThemedList<IndexerConfig.RepositoryEntry> repositoryList = new ThemedList<>(listModel);
+    private final ThemedTextField searchField  = new ThemedTextField(20);
+    private final ThemedButton    addButton    = new ThemedButton("Add");
+    private final ThemedButton    editButton   = new ThemedButton("Edit");
+    private final ThemedButton    removeButton = new ThemedButton("Remove");
+    private final ThemedLabel     statusLabel  = new ThemedLabel(" ");
 
     /**
      * Creates a new {@code RepositoriesManagementPanel}.
      *
-     * @param loader reads the current repository configuration from disk
-     * @param saver  persists configuration changes to disk
+     * @param loader          reads the current configuration from disk
+     * @param saver           persists configuration changes to disk
+     * @param onConfigChanged called after every successful save so the owning plugin can
+     *                        restart its SSE listeners; may be {@code null}
      */
-    public RepositoriesManagementPanel(PollerConfigLoader loader, PollerConfigSaver saver) {
+    public RepositoriesManagementPanel(IndexerConfigLoader loader, IndexerConfigSaver saver, Runnable onConfigChanged) {
         this.loader = loader;
         this.saver = saver;
-        setBorder(ThemedTitledBorder.create("Repositories"));
+        this.onConfigChanged = onConfigChanged != null ? onConfigChanged : () -> {};
+        setBorder(ThemedTitledBorder.create("Central Indexer"));
         configureLayout();
         setupListeners();
-        loadRepositories();
+        loadSettings();
     }
 
     private void configureLayout() {
-        setLayout(new MigLayout("fill, insets 10", "[grow][]", "[]8[grow][]"));
+        setLayout(new MigLayout("fill, insets 10", "[grow]", "[][grow][]"));
+        add(buildConnectionPanel(), "growx, wrap");
+        add(buildRepositorySection(), "grow, wrap");
+        add(statusLabel, "growx");
+    }
+
+    private ThemedPanel buildConnectionPanel() {
+        ThemedPanel panel = new ThemedPanel();
+        panel.setBorder(ThemedTitledBorder.create("Connection"));
+        panel.setLayout(new MigLayout("", "[][grow]", "[]8[]"));
+
+        panel.add(new ThemedLabel("Indexer URL:"),  "cell 0 0");
+        panel.add(indexerUrlField,                  "cell 1 0, growx");
+        panel.add(new ThemedLabel("Bearer token:"), "cell 0 1");
+        panel.add(bearerTokenField,                 "cell 1 1, growx");
+        return panel;
+    }
+
+    private ThemedPanel buildRepositorySection() {
+        ThemedPanel panel = new ThemedPanel();
+        panel.setBorder(ThemedTitledBorder.create("Repositories"));
+        panel.setLayout(new MigLayout("fill, insets 5", "[grow][]", "[]8[grow]"));
 
         searchField.putClientProperty("JTextField.placeholderText", "Search repositories...");
-        add(searchField, "cell 0 0 2 1, growx");
+        panel.add(searchField, "cell 0 0 2 1, growx");
 
-        repositoryList.setCellRenderer(new PollerConfigRenderer());
-        ThemedScrollPane scrollPane = new ThemedScrollPane(repositoryList);
-        add(scrollPane, "cell 0 1, grow");
-
-        add(buildButtonPanel(), "cell 1 1, growy");
-
-        add(statusLabel, "cell 0 2 2 1, growx");
+        repositoryList.setCellRenderer(new RepositoryEntryRenderer());
+        panel.add(new ThemedScrollPane(repositoryList), "cell 0 1, grow");
+        panel.add(buildButtonPanel(), "cell 1 1, growy");
+        return panel;
     }
 
     private ThemedPanel buildButtonPanel() {
@@ -90,66 +124,77 @@ public class RepositoriesManagementPanel extends ThemedPanel {
                 updateButtonStates();
             }
         });
-        addButton.addActionListener(this::onAdd);
-        editButton.addActionListener(this::onEdit);
-        removeButton.addActionListener(this::onRemove);
+        addButton.addActionListener(e -> onAdd());
+        editButton.addActionListener(e -> onEdit());
+        removeButton.addActionListener(e -> onRemove());
         searchField.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e)  { applyFilter(); }
             public void removeUpdate(DocumentEvent e)  { applyFilter(); }
             public void changedUpdate(DocumentEvent e) { applyFilter(); }
         });
+        addSaveFocusListener(indexerUrlField);
+        addSaveFocusListener(bearerTokenField);
     }
 
-    private void loadRepositories() {
+    private void addSaveFocusListener(ThemedTextField field) {
+        field.addFocusListener(new FocusAdapter() {
+            @Override
+            public void focusLost(FocusEvent e) {
+                saveAll(null);
+            }
+        });
+    }
+
+    private void loadSettings() {
+        IndexerConfig config = loader.load();
+        indexerUrlField.setText(config.indexerUrl());
+        bearerTokenField.setText(config.bearerToken());
         allRepositories.clear();
-        allRepositories.addAll(loader.loadConfigurations());
+        allRepositories.addAll(config.repositories());
         applyFilter();
     }
 
     private void applyFilter() {
         String query = searchField.getText().trim().toLowerCase();
-        PollerConfig previousSelection = repositoryList.getSelectedValue();
-
+        IndexerConfig.RepositoryEntry previousSelection = repositoryList.getSelectedValue();
         listModel.clear();
         allRepositories.stream()
-            .filter(c -> matchesFilter(c, query))
-            .forEach(listModel::addElement);
-
+                .filter(r -> matchesFilter(r, query))
+                .forEach(listModel::addElement);
         if (previousSelection != null) {
             repositoryList.setSelectedValue(previousSelection, true);
         }
         updateButtonStates();
     }
 
-    private boolean matchesFilter(PollerConfig config, String query) {
+    private boolean matchesFilter(IndexerConfig.RepositoryEntry entry, String query) {
         if (query.isEmpty()) {
             return true;
         }
-        return config.repositoryName().toLowerCase().contains(query)
-            || config.repositoryUrl().toLowerCase().contains(query);
+        return entry.name().toLowerCase().contains(query) || entry.location().toLowerCase().contains(query);
     }
 
     private void onAdd() {
         RepositoryEntryDialog dialog = new RepositoryEntryDialog(getParentWindow());
         dialog.setVisible(true);
         if (dialog.isConfirmed()) {
-            PollerConfig config = dialog.buildConfig();
-            allRepositories.add(config);
+            IndexerConfig.RepositoryEntry entry = dialog.buildEntry();
+            allRepositories.add(entry);
             saveAll("Repository added.");
             applyFilter();
-            repositoryList.setSelectedValue(config, true);
+            repositoryList.setSelectedValue(entry, true);
         }
     }
 
     private void onEdit() {
-        PollerConfig existing = repositoryList.getSelectedValue();
+        IndexerConfig.RepositoryEntry existing = repositoryList.getSelectedValue();
         if (existing == null) {
             return;
         }
         RepositoryEntryDialog dialog = new RepositoryEntryDialog(getParentWindow(), existing);
         dialog.setVisible(true);
         if (dialog.isConfirmed()) {
-            PollerConfig updated = dialog.buildConfig();
+            IndexerConfig.RepositoryEntry updated = dialog.buildEntry();
             int masterIndex = allRepositories.indexOf(existing);
             if (masterIndex >= 0) {
                 allRepositories.set(masterIndex, updated);
@@ -161,30 +206,40 @@ public class RepositoriesManagementPanel extends ThemedPanel {
     }
 
     private void onRemove() {
-        PollerConfig config = repositoryList.getSelectedValue();
-        if (config == null) {
+        IndexerConfig.RepositoryEntry entry = repositoryList.getSelectedValue();
+        if (entry == null) {
             return;
         }
         boolean confirmed = ThemedConfirmDialog.showConfirmation(
-            getParentWindow(),
-            "Remove Repository",
-            "Remove '" + config.repositoryName() + "'?"
-        );
+                getParentWindow(),
+                "Remove Repository",
+                "Remove '" + entry.name() + "'?");
         if (confirmed) {
-            allRepositories.remove(config);
+            allRepositories.remove(entry);
             saveAll("Repository removed.");
             applyFilter();
         }
     }
 
     private void saveAll(String successMessage) {
+        IndexerConfig config = buildCurrentConfig();
         try {
-            saver.save(allRepositories);
-            setStatus(successMessage);
+            saver.save(config);
+            if (successMessage != null) {
+                setStatus(successMessage);
+            }
+            onConfigChanged.run();
         } catch (IOException e) {
-            LOGGER.error("Failed to save repository configuration", e);
+            LOGGER.error("Failed to save configuration", e);
             setStatus("Error saving configuration.");
         }
+    }
+
+    private IndexerConfig buildCurrentConfig() {
+        return new IndexerConfig(
+                indexerUrlField.getText().trim(),
+                bearerTokenField.getText().trim(),
+                List.copyOf(allRepositories));
     }
 
     private void updateButtonStates() {
@@ -204,28 +259,23 @@ public class RepositoriesManagementPanel extends ThemedPanel {
         return SwingUtilities.getWindowAncestor(this);
     }
 
-    /**
-     * Reusable cell renderer for {@link PollerConfig} entries.
-     * A single label instance is reconfigured per call rather than allocated fresh,
-     * avoiding per-paint object allocation that degrades rendering performance.
-     */
-    private static class PollerConfigRenderer extends ThemedLabel implements ListCellRenderer<PollerConfig> {
+    private static class RepositoryEntryRenderer extends ThemedLabel
+            implements ListCellRenderer<IndexerConfig.RepositoryEntry> {
 
-        private PollerConfigRenderer() {
+        private RepositoryEntryRenderer() {
             setOpaque(true);
             setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
         }
 
         @Override
         public Component getListCellRendererComponent(
-                JList<? extends PollerConfig> list,
-                PollerConfig config,
+                JList<? extends IndexerConfig.RepositoryEntry> list,
+                IndexerConfig.RepositoryEntry entry,
                 int index,
                 boolean isSelected,
                 boolean cellHasFocus) {
-            setText("<html><b>" + config.repositoryName() + "</b>&nbsp;&nbsp;"
-                + "<span style='color:gray'>" + config.repositoryUrl() + "</span>&nbsp;"
-                + "<i>(" + (config.pollIntervalMs() / 1000) + "s)</i></html>");
+            setText("<html><b>" + entry.name() + "</b>&nbsp;&nbsp;"
+                    + "<span style='color:gray'>" + entry.location() + "</span></html>");
             if (isSelected) {
                 setBackground(list.getSelectionBackground());
                 setForeground(list.getSelectionForeground());

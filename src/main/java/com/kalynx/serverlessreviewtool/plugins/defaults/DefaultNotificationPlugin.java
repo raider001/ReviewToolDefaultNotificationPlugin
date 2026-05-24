@@ -6,193 +6,239 @@ import com.kalynx.serverlessreviewtool.plugin.RepositoryDescriptor;
 import com.kalynx.serverlessreviewtool.plugin.RepositoryListUpdate;
 import com.kalynx.serverlessreviewtool.plugin.ReviewListUpdate;
 import com.kalynx.serverlessreviewtool.plugin.ReviewUpdateType;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoryChangePoller;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfig;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigLoader;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.PollerConfigSaver;
-import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.RepositoriesFileWatcher;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfig;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfigLoader;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerConfigSaver;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerRestClient;
+import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.IndexerSseListener;
 import com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin.ui.RepositoriesManagementPanel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
- * Default notification plugin that detects repository changes via background polling.
+ * Default notification plugin that receives review change events from the Central Indexer.
  *
- * <p>This plugin provides stateless, in-memory polling of Git repositories without cloning.
- * It uses {@code git ls-remote} to efficiently detect when repository refs have changed,
- * firing notifications to registered listeners when updates occur.
+ * <p>On initialisation the plugin:
+ * <ol>
+ *   <li>Calls {@code GET /reviews} to fetch the current review list and fires a
+ *       {@code CREATED} event for every review so the application populates its initial state.</li>
+ *   <li>Opens a single persistent SSE connection using {@code GET /events/stream?repository=*}
+ *       to receive incremental updates thereafter.</li>
+ * </ol>
  *
- * <p><b>Key Features:</b>
- * <ul>
- *   <li>Stateless - maintains only in-memory ref state, no file storage</li>
- *   <li>Background threads - runs daemon threads per repository, non-blocking</li>
- *   <li>Lightweight - uses git ls-remote only, no cloning or fetching</li>
- *   <li>Configurable - loads polling configuration from repositories.json</li>
- * </ul>
+ * <p>The {@link IndexerSseListener} reconnects automatically after a network interruption.
+ * When the user saves changes in the settings panel, the plugin restarts its SSE listener
+ * and re-fetches the review list with the updated configuration.
  *
- * <p><b>Configuration:</b>
- * Repositories to monitor are configured in {@code repositories.json} (or custom location via
- * system property {@code srt.notification.config}). Each repository entry includes:
- * <ul>
- *   <li>name - unique repository identifier</li>
- *   <li>url/location - remote URL or local path</li>
- *   <li>pollIntervalSeconds / poll_rate - milliseconds between polling</li>
- * </ul>
- *
- * <p><b>Usage:</b>
+ * <p>Configuration format ({@code repositories.json}):
  * <pre>{@code
- * pluginManager.addListenerToNotificationPlugins(
- *     NotificationPlugin.NotificationType.REVIEW_UPDATED,
- *     updates -> System.out.println("Review updates received: " + updates.length)
- * );
+ * {
+ *   "indexerUrl":  "http://localhost:8765",
+ *   "bearerToken": "my-token",
+ *   "repositories": [
+ *     { "name": "owner/repo", "location": "https://github.com/owner/repo.git" }
+ *   ]
+ * }
  * }</pre>
- *
- * <p>The plugin is typically initialized by the application plugin manager,
  */
 public class DefaultNotificationPlugin extends NotificationPlugin {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DefaultNotificationPlugin.class);
-    private static final String CONFIG_PROPERTY = "srt.notification.config";
-    private static final String DEFAULT_CONFIG_NAME = "repositories.json";
 
-    private final Map<String, PollerConfig> trackedRepositories = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<String, ScheduledFuture<?>> scheduledTasks = new java.util.concurrent.ConcurrentHashMap<>();
-    private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(
-            10,
-            r -> {
-                Thread t = new Thread(r);
-                t.setDaemon(true);
-                t.setName("RepositoryChangePoller-" + scheduledTasks.size());
-                return t;
-            }
-    );
+    private final Map<String, ListenerHandle> handles = new ConcurrentHashMap<>();
 
-    /**
-     * Returns a {@link PluginPanel} contributing the repository management panel to the
-     * application menu at priority 50.
-     *
-     * @return plugin panel descriptor
-     */
     @Override
     public PluginPanel getUI() {
         RepositoriesManagementPanel panel = new RepositoriesManagementPanel(
-            new PollerConfigLoader(),
-            new PollerConfigSaver()
-        );
+                new IndexerConfigLoader(),
+                new IndexerConfigSaver(),
+                this::onConfigurationChanged);
         return new PluginPanel("Repositories", panel, 50);
     }
 
-    /**
-     * Initializes polling from configured repositories and starts file watching.
-     */
     @Override
     public void initialize() {
         LOGGER.info("DefaultNotificationPlugin initializing");
-        PollerConfigLoader loader = new PollerConfigLoader();
-        loader.loadConfigurations().forEach(this::startPolling);
-        notifyRepositoriesUpdated();
-
-        Path configPath = resolveConfigPath();
-        RepositoriesFileWatcher watcher = new RepositoriesFileWatcher(
-            configPath,
-            this::onConfigurationChanged
-        );
-        watcher.start();
+        IndexerConfig config = new IndexerConfigLoader().load();
+        List<IndexerRestClient.ReviewSummary> reviews = fetchInitialReviews(config);
+        fireInitialReviewEvents(reviews, config);
+        notifyRepositoriesUpdated(config, reviews);
+        startListeners(config);
     }
 
-    private void onConfigurationChanged(String newConfigContent) {
-        LOGGER.info("Configuration changed, reloading repositories");
-        PollerConfigLoader loader = new PollerConfigLoader();
-        List<PollerConfig> newConfigs = loader.loadConfigurations();
+    private void onConfigurationChanged() {
+        LOGGER.info("Configuration changed — restarting SSE listeners");
+        stopAllListeners();
+        IndexerConfig config = new IndexerConfigLoader().load();
+        List<IndexerRestClient.ReviewSummary> reviews = fetchInitialReviews(config);
+        fireInitialReviewEvents(reviews, config);
+        notifyRepositoriesUpdated(config, reviews);
+        startListeners(config);
+    }
 
-        Map<String, PollerConfig> newConfigsByName = new java.util.HashMap<>();
-        for (PollerConfig config : newConfigs) {
-            newConfigsByName.put(config.repositoryName(), config);
+    private List<IndexerRestClient.ReviewSummary> fetchInitialReviews(IndexerConfig config) {
+        if (config.indexerUrl().isBlank()) {
+            return List.of();
         }
+        List<IndexerRestClient.ReviewSummary> reviews = new IndexerRestClient().fetchReviews(config);
+        LOGGER.info("Fetched {} reviews from indexer at startup", reviews.size());
+        return reviews;
+    }
 
-        for (String repoName : trackedRepositories.keySet()) {
-            if (!newConfigsByName.containsKey(repoName)) {
-                stopPolling(repoName);
-                LOGGER.info("Removed repository from polling: {}", repoName);
+    private void fireInitialReviewEvents(List<IndexerRestClient.ReviewSummary> reviews, IndexerConfig config) {
+        for (IndexerRestClient.ReviewSummary summary : reviews) {
+            String primaryRepo = summary.repositories().isEmpty()
+                    ? null
+                    : summary.repositories().getFirst().repository();
+            String repoUrl = resolveRepositoryUrl(primaryRepo, summary.repositories(), config);
+            List<String> repoNames = summary.repositories().stream()
+                    .map(IndexerRestClient.RepositoryRef::repository)
+                    .collect(Collectors.toList());
+
+            ReviewUpdateType type = "COMPLETED".equalsIgnoreCase(summary.status())
+                    || "CANCELLED".equalsIgnoreCase(summary.status())
+                    ? ReviewUpdateType.UPDATED
+                    : ReviewUpdateType.CREATED;
+
+            ReviewListUpdate update = new ReviewListUpdate(
+                    UUID.randomUUID().toString(),
+                    Instant.now(),
+                    type,
+                    summary.reviewId(),
+                    primaryRepo,
+                    repoNames,
+                    repoUrl,
+                    null);
+            onReviewUpdated(update);
+        }
+    }
+
+    private void startListeners(IndexerConfig config) {
+        if (config.repositories().isEmpty()) {
+            return;
+        }
+        startListener(IndexerSseListener.WILDCARD_REPO, config);
+    }
+
+    private void startListener(String repository, IndexerConfig config) {
+        IndexerSseListener listener = new IndexerSseListener(repository, config, this::onIndexerEvent);
+        Thread thread = new Thread(listener, "IndexerSseListener-" + repository);
+        thread.setDaemon(true);
+        thread.start();
+        handles.put(repository, new ListenerHandle(listener, thread));
+        LOGGER.info("Started SSE listener for '{}'", repository);
+    }
+
+    private void stopAllListeners() {
+        handles.values().forEach(ListenerHandle::stop);
+        handles.clear();
+    }
+
+    private void onIndexerEvent(IndexerSseListener.IndexerEvent event) {
+        ReviewUpdateType type = mapEventType(event.eventType());
+        if (type == null) {
+            LOGGER.debug("Ignoring unrecognised event type '{}'", event.eventType());
+            return;
+        }
+        String eventId = UUID.randomUUID().toString();
+
+        // For branch.* events the URL is in the payload; for review.* events look it up from config.
+        IndexerConfig config = new IndexerConfigLoader().load();
+        String repoUrl = event.repositoryUrl() != null
+                ? event.repositoryUrl()
+                : resolveUrlFromConfig(event.repository(), config);
+
+        List<String> repos = event.repository() != null ? List.of(event.repository()) : List.of();
+
+        ReviewListUpdate update = new ReviewListUpdate(
+                eventId,
+                Instant.now(),
+                type,
+                event.reviewId(),
+                event.repository(),
+                repos,
+                repoUrl,
+                event.branchName());
+        onReviewUpdated(update);
+    }
+
+    private ReviewUpdateType mapEventType(String eventType) {
+        if (eventType == null) return null;
+        return switch (eventType) {
+            case "review.created"  -> ReviewUpdateType.CREATED;
+            case "review.updated"  -> ReviewUpdateType.UPDATED;
+            case "branch.updated"  -> ReviewUpdateType.UPDATED;
+            case "branch.deleted"  -> ReviewUpdateType.DELETED;
+            default                -> null;
+        };
+    }
+
+    /**
+     * Resolves the git URL for a repository name.
+     * Checks the SSE-event-supplied list first, then falls back to plugin config.
+     */
+    private String resolveRepositoryUrl(String repoName,
+                                        List<IndexerRestClient.RepositoryRef> payloadRefs,
+                                        IndexerConfig config) {
+        if (repoName == null) return null;
+        // Try the payload refs first (populated from GET /reviews response).
+        for (IndexerRestClient.RepositoryRef ref : payloadRefs) {
+            if (repoName.equals(ref.repository()) && ref.repositoryUrl() != null) {
+                return ref.repositoryUrl();
             }
         }
+        return resolveUrlFromConfig(repoName, config);
+    }
 
-        for (PollerConfig config : newConfigs) {
-            if (!trackedRepositories.containsKey(config.repositoryName())) {
-                startPolling(config);
-                LOGGER.info("Added new repository to polling: {}", config.repositoryName());
-            } else {
-                PollerConfig existing = trackedRepositories.get(config.repositoryName());
-                if (!existing.equals(config)) {
-                    stopPolling(config.repositoryName());
-                    startPolling(config);
-                    LOGGER.info("Updated polling for repository: {}", config.repositoryName());
+    private String resolveUrlFromConfig(String repoName, IndexerConfig config) {
+        if (repoName == null) return null;
+        return config.repositories().stream()
+                .filter(r -> repoName.equals(r.name()))
+                .map(IndexerConfig.RepositoryEntry::location)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void notifyRepositoriesUpdated(IndexerConfig config,
+                                           List<IndexerRestClient.ReviewSummary> reviews) {
+        // Merge repositories from config and from the review list (reviews may reference repos
+        // not yet in the local config).
+        List<RepositoryDescriptor> descriptors = new ArrayList<>();
+        config.repositories().stream()
+                .map(r -> new RepositoryDescriptor(r.name(), r.location()))
+                .forEach(descriptors::add);
+
+        for (IndexerRestClient.ReviewSummary summary : reviews) {
+            for (IndexerRestClient.RepositoryRef ref : summary.repositories()) {
+                boolean known = descriptors.stream()
+                        .anyMatch(d -> d.name().equals(ref.repository()));
+                if (!known && ref.repository() != null) {
+                    descriptors.add(new RepositoryDescriptor(ref.repository(), ref.repositoryUrl()));
                 }
             }
         }
 
-        notifyRepositoriesUpdated();
-    }
-
-    private void stopPolling(String repositoryName) {
-        ScheduledFuture<?> future = scheduledTasks.remove(repositoryName);
-        if (future != null) {
-            future.cancel(false);
-        }
-        trackedRepositories.remove(repositoryName);
-    }
-
-    private Path resolveConfigPath() {
-        String configured = System.getProperty(CONFIG_PROPERTY, DEFAULT_CONFIG_NAME);
-        return Path.of(configured).toAbsolutePath().normalize();
-    }
-
-    private void startPolling(PollerConfig config) {
-        trackedRepositories.put(config.repositoryName(), config);
-        RepositoryChangePoller poller = new RepositoryChangePoller(config, this::onRepositoryChanged);
-        ScheduledFuture<?> future = executorService.scheduleAtFixedRate(
-                poller,
-                0,
-                config.pollIntervalMs(),
-                TimeUnit.MILLISECONDS
-        );
-        scheduledTasks.put(config.repositoryName(), future);
-        LOGGER.info("Started polling for repository: {}", config.repositoryName());
-    }
-
-    private void onRepositoryChanged(PollerConfig config) {
-        ReviewListUpdate update = new ReviewListUpdate(
-            UUID.randomUUID().toString(),
-            Instant.now(),
-            ReviewUpdateType.UPDATED,
-            config.repositoryName(),
-            config.repositoryName(),
-            List.of(config.repositoryName())
-        );
-        onReviewUpdated(update);
-    }
-
-    private void notifyRepositoriesUpdated() {
+        descriptors.sort(Comparator.comparing(RepositoryDescriptor::name));
         RepositoryListUpdate update = new RepositoryListUpdate(
-            UUID.randomUUID().toString(),
-            Instant.now(),
-            trackedRepositories.values().stream()
-                .map(config -> new RepositoryDescriptor(
-                    config.repositoryName(),
-                    config.repositoryUrl()))
-                .sorted(java.util.Comparator.comparing(RepositoryDescriptor::name))
-                .toList()
-        );
+                UUID.randomUUID().toString(),
+                Instant.now(),
+                descriptors);
         onRepositoriesUpdated(update);
+    }
+
+    private record ListenerHandle(IndexerSseListener listener, Thread thread) {
+        void stop() {
+            listener.stop();
+            thread.interrupt();
+        }
     }
 }
