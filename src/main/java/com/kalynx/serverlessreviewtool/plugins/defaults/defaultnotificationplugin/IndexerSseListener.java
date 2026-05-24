@@ -159,13 +159,15 @@ public class IndexerSseListener implements Runnable {
             } catch (NumberFormatException ignored) {
             }
         }
-        LOGGER.debug("SSE frame received for '{}': id={} event={} data={}",
-                repository, frame.id, frame.eventType, frame.data);
+        LOGGER.info("[Plugin-SSE] Frame received for '{}': event='{}' id='{}'",
+                repository, frame.eventType, frame.id);
         IndexerEvent event = parseEvent(frame);
         if (event != null) {
-            LOGGER.debug("Dispatching event to plugin: repo='{}' type='{}' reviewId='{}'",
-                    event.repository(), event.eventType(), event.reviewId());
+            LOGGER.info("[Plugin-SSE] Dispatching to plugin: type='{}' repo='{}' reviewId='{}' repoUrl='{}'",
+                    event.eventType(), event.repository(), event.reviewId(), event.repositoryUrl());
             onEvent.accept(event);
+        } else {
+            LOGGER.info("[Plugin-SSE] Frame parsed to null event (unrecognised or malformed)");
         }
     }
 
@@ -180,10 +182,12 @@ public class IndexerSseListener implements Runnable {
             if (eventType == null) {
                 return null;
             }
-            String reviewId = getString(obj, "review_id");
+            String reviewId = getString(obj, "reviewId");
             String repo = getString(obj, "repository");
-            String repositoryUrl = getString(obj, "repository_url");
-            String branchName = getString(obj, "branch_name");
+            JsonObject payload = obj.has("payload") && obj.get("payload").isJsonObject()
+                    ? obj.getAsJsonObject("payload") : new JsonObject();
+            String repositoryUrl = getString(payload, "repository_url");
+            String branchName = getString(payload, "branch_name");
             return new IndexerEvent(eventType, reviewId, repo, repositoryUrl, branchName);
         } catch (Exception e) {
             LOGGER.warn("Failed to parse SSE event for '{}': {}", repository, e.getMessage());

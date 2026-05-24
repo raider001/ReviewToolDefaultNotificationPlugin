@@ -123,7 +123,8 @@ public class DefaultNotificationPlugin extends NotificationPlugin {
     }
 
     private void startListeners(IndexerConfig config) {
-        if (config.repositories().isEmpty()) {
+        if (config.indexerUrl().isBlank()) {
+            LOGGER.info("No indexer URL configured — SSE listener not started");
             return;
         }
         startListener(IndexerSseListener.WILDCARD_REPO, config);
@@ -174,11 +175,12 @@ public class DefaultNotificationPlugin extends NotificationPlugin {
     private ReviewUpdateType mapEventType(String eventType) {
         if (eventType == null) return null;
         return switch (eventType) {
-            case "review.created"  -> ReviewUpdateType.CREATED;
-            case "review.updated"  -> ReviewUpdateType.UPDATED;
-            case "branch.updated"  -> ReviewUpdateType.UPDATED;
-            case "branch.deleted"  -> ReviewUpdateType.DELETED;
-            default                -> null;
+            case "REVIEW_CREATED"                                                  -> ReviewUpdateType.CREATED;
+            case "REVIEW_UPDATED", "REVIEW_CLOSED",
+                 "REVIEW_COMMENT_ADDED", "REVIEW_COMMENT_UPDATED"                 -> ReviewUpdateType.UPDATED;
+            case "BRANCH_UPDATED"                                                  -> ReviewUpdateType.UPDATED;
+            case "BRANCH_DELETED"                                                  -> ReviewUpdateType.DELETED;
+            default                                                                -> null;
         };
     }
 
