@@ -136,7 +136,6 @@ public class IndexerSseListener implements Runnable {
     private void parseSseStream(Stream<String> lines) {
         SseFrame frame = new SseFrame();
         lines.forEach(line -> {
-            LOGGER.debug("SSE raw line for '{}': '{}'", repository, line);
             if (line.isEmpty()) {
                 if (frame.hasData()) {
                     dispatchFrame(frame);
