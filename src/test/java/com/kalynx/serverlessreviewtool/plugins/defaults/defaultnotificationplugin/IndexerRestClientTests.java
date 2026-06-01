@@ -1,5 +1,10 @@
 package com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin;
 
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config.IndexerConfig;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config.IndexerConfigManager;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.http.HttpClientWrapper;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.requests.IndexerRestClient;
+import com.kalynx.serverlessreviewtool.plugin.dataobjects.ReviewSummary;
 import org.junit.jupiter.api.Test;
 
 import javax.net.ssl.SSLContext;
@@ -39,6 +44,10 @@ class IndexerRestClientTests {
         return new IndexerConfig(url, "", List.of());
     }
 
+    private static IndexerRestClient client(HttpClient http, IndexerConfig cfg) {
+        return new IndexerRestClient(new HttpClientWrapper(http), new IndexerConfigManager(cfg));
+    }
+
     // -------------------------------------------------------------------------
     // Happy path — single review
     // -------------------------------------------------------------------------
@@ -64,18 +73,17 @@ class IndexerRestClientTests {
                 }
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        IndexerRestClient.ReviewSummary r = reviews.get(0);
+        ReviewSummary r = reviews.getFirst();
         assertEquals("r1", r.reviewId());
         assertEquals("OPEN", r.status());
         assertEquals("feature/foo", r.reviewBranch());
         assertEquals("main", r.baseBranch());
         assertEquals(1, r.repositories().size());
-        assertEquals("owner/repo", r.repositories().get(0).repository());
-        assertEquals("https://github.com/owner/repo.git", r.repositories().get(0).repositoryUrl());
+        assertEquals("owner/repo", r.repositories().getFirst().name());
+        assertEquals("https://github.com/owner/repo.git", r.repositories().getFirst().location());
     }
 
     // -------------------------------------------------------------------------
@@ -92,8 +100,7 @@ class IndexerRestClientTests {
                 ]}
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(3, reviews.size());
         assertEquals("r1", reviews.get(0).reviewId());
@@ -103,10 +110,7 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_emptyItemsArray_returnsEmptyList() {
-        String json = "{\"items\": []}";
-
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, "{\"items\": []}"), config("http://localhost:8765")).fetchReviews();
 
         assertNotNull(reviews);
         assertTrue(reviews.isEmpty());
@@ -114,10 +118,7 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_noItemsField_returnsEmptyList() {
-        String json = "{\"meta\": {\"total\": 0}}";
-
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, "{\"meta\": {\"total\": 0}}"), config("http://localhost:8765")).fetchReviews();
 
         assertNotNull(reviews);
         assertTrue(reviews.isEmpty());
@@ -129,13 +130,10 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_missingOptionalFields_nullsForAbsentFields() {
-        String json = "{\"items\": [{\"review_id\": \"r1\"}]}";
-
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, "{\"items\": [{\"review_id\": \"r1\"}]}"), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        IndexerRestClient.ReviewSummary r = reviews.get(0);
+        ReviewSummary r = reviews.getFirst();
         assertEquals("r1", r.reviewId());
         assertNull(r.status());
         assertNull(r.reviewBranch());
@@ -149,13 +147,12 @@ class IndexerRestClientTests {
                 {"items": [{"review_id": "r1", "repositories": [{"repository": "owner/repo"}]}]}
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        assertEquals(1, reviews.get(0).repositories().size());
-        assertEquals("owner/repo", reviews.get(0).repositories().get(0).repository());
-        assertNull(reviews.get(0).repositories().get(0).repositoryUrl(),
+        assertEquals(1, reviews.getFirst().repositories().size());
+        assertEquals("owner/repo", reviews.getFirst().repositories().getFirst().name());
+        assertNull(reviews.getFirst().repositories().getFirst().location(),
                 "repository_url should be null when absent");
     }
 
@@ -171,13 +168,12 @@ class IndexerRestClientTests {
                 }]}
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        assertEquals(2, reviews.get(0).repositories().size());
-        assertEquals("org/backend",  reviews.get(0).repositories().get(0).repository());
-        assertEquals("org/frontend", reviews.get(0).repositories().get(1).repository());
+        assertEquals(2, reviews.getFirst().repositories().size());
+        assertEquals("org/backend",  reviews.getFirst().repositories().getFirst().name());
+        assertEquals("org/frontend", reviews.getFirst().repositories().get(1).name());
     }
 
     // -------------------------------------------------------------------------
@@ -193,11 +189,10 @@ class IndexerRestClientTests {
                 ]}
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        assertEquals("r2", reviews.get(0).reviewId());
+        assertEquals("r2", reviews.getFirst().reviewId());
     }
 
     @Test
@@ -211,11 +206,10 @@ class IndexerRestClientTests {
                 }]}
                 """;
 
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), config("http://localhost:8765")).fetchReviews();
 
         assertEquals(1, reviews.size());
-        assertTrue(reviews.get(0).repositories().isEmpty(),
+        assertTrue(reviews.getFirst().repositories().isEmpty(),
                 "Repository entry without a 'repository' field should be skipped");
     }
 
@@ -225,8 +219,7 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_500Response_returnsEmptyList() {
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(500, "Internal Server Error"));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(500, "Internal Server Error"), config("http://localhost:8765")).fetchReviews();
 
         assertNotNull(reviews);
         assertTrue(reviews.isEmpty());
@@ -234,18 +227,12 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_404Response_returnsEmptyList() {
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(404, "Not Found"));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
-
-        assertTrue(reviews.isEmpty());
+        assertTrue(client(new FakeHttpClient(404, "Not Found"), config("")).fetchReviews().isEmpty());
     }
 
     @Test
     void fetchReviews_503Response_returnsEmptyList() {
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(503, "Service Unavailable"));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
-
-        assertTrue(reviews.isEmpty());
+        assertTrue(client(new FakeHttpClient(503, "Service Unavailable"), config("")).fetchReviews().isEmpty());
     }
 
     // -------------------------------------------------------------------------
@@ -255,8 +242,7 @@ class IndexerRestClientTests {
     @Test
     void fetchReviews_blankIndexerUrl_returnsEmptyListWithoutHttp() {
         FakeHttpClient fake = new FakeHttpClient(200, "{\"items\":[]}");
-        IndexerRestClient client = new IndexerRestClient(fake);
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config(""));
+        List<ReviewSummary> reviews = client(fake, config("")).fetchReviews();
 
         assertTrue(reviews.isEmpty());
         assertEquals(0, fake.callCount, "HTTP must not be called when URL is blank");
@@ -265,8 +251,7 @@ class IndexerRestClientTests {
     @Test
     void fetchReviews_nullIndexerUrl_returnsEmptyListWithoutHttp() {
         FakeHttpClient fake = new FakeHttpClient(200, "{\"items\":[]}");
-        IndexerRestClient client = new IndexerRestClient(fake);
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(new IndexerConfig(null, "", List.of()));
+        List<ReviewSummary> reviews = client(fake, new IndexerConfig(null, "", List.of())).fetchReviews();
 
         assertTrue(reviews.isEmpty());
         assertEquals(0, fake.callCount, "HTTP must not be called when URL is null");
@@ -278,8 +263,7 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_malformedJson_returnsEmptyList() {
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, "{{not valid json{{"));
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, "{{not valid json{{"), config("http://localhost:8765")).fetchReviews();
 
         assertNotNull(reviews);
         assertTrue(reviews.isEmpty(), "Malformed JSON should produce an empty list, not throw");
@@ -287,8 +271,7 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_httpClientThrows_returnsEmptyList() {
-        IndexerRestClient client = new IndexerRestClient(new ThrowingHttpClient());
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(config("http://localhost:8765"));
+        List<ReviewSummary> reviews = client(new ThrowingHttpClient(), config("http://localhost:8765")).fetchReviews();
 
         assertNotNull(reviews);
         assertTrue(reviews.isEmpty(), "IOException from HTTP client should be swallowed");
@@ -300,13 +283,11 @@ class IndexerRestClientTests {
 
     @Test
     void fetchReviews_bearerTokenPresent_callSucceeds() {
-        // We can't easily inspect headers without a full HTTP stack,
-        // but we verify the call completes (non-blank token path) without error.
         String json = "{\"items\": [{\"review_id\": \"r1\", \"repositories\": []}]}";
-        IndexerRestClient client = new IndexerRestClient(new FakeHttpClient(200, json));
         IndexerConfig configWithToken = new IndexerConfig("http://localhost:8765", "my-token", List.of());
 
-        List<IndexerRestClient.ReviewSummary> reviews = client.fetchReviews(configWithToken);
+        List<ReviewSummary> reviews = client(new FakeHttpClient(200, json), configWithToken).fetchReviews();
+
         assertEquals(1, reviews.size());
     }
 

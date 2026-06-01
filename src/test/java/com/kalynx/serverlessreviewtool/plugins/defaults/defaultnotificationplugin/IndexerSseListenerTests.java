@@ -1,11 +1,15 @@
 package com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin;
 
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config.IndexerConfig;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config.IndexerConfigManager;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.http.HttpClientWrapper;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.sse.IndexerSseListener;
+import com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.sse.SseEvent;
 import org.junit.jupiter.api.Test;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
-import java.io.IOException;
 import java.net.Authenticator;
 import java.net.CookieHandler;
 import java.net.ProxySelector;
@@ -33,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Each test wires a {@link FakeSseHttpClient} that returns a pre-built SSE response,
  * runs the listener in a daemon thread, waits for the expected events via a
- * {@link CountDownLatch}, and then stops + interrupts the thread.  No network is involved.
+ * {@link CountDownLatch}, and then stops + interrupts the thread. No network is involved.
  */
 class IndexerSseListenerTests {
 
@@ -44,33 +48,22 @@ class IndexerSseListenerTests {
     // Helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Runs the listener against the given SSE text, waits for {@code expectedCount} events
-     * (up to 5 seconds), then shuts the listener down.
-     *
-     * @param rawSse       raw SSE text with {@code \n} line endings (event blocks separated by
-     *                     blank lines, e.g. {@code "id: 1\nevent: review.created\ndata: {...}\n\n"})
-     * @param expectedCount number of events to wait for before shutting down
-     * @return the events received in delivery order
-     */
-    private List<IndexerSseListener.IndexerEvent> runListener(String rawSse, int expectedCount)
+    private List<SseEvent> runListener(String rawSse, int expectedCount)
             throws InterruptedException {
-        List<IndexerSseListener.IndexerEvent> captured = new ArrayList<>();
+        List<SseEvent> captured = new ArrayList<>();
         CountDownLatch latch = new CountDownLatch(expectedCount);
 
         Stream<String> lines = Arrays.stream(rawSse.split("\n", -1));
         FakeSseHttpClient fake = new FakeSseHttpClient(200, lines);
 
-        IndexerSseListener listener = new IndexerSseListener("*", CONFIG, e -> {
-            captured.add(e);
-            latch.countDown();
-        }, fake);
+        IndexerSseListener listener = new IndexerSseListener(
+                "*", new IndexerConfigManager(CONFIG), e -> { captured.add(e); latch.countDown(); },
+                new HttpClientWrapper(fake));
 
         Thread thread = new Thread(listener, "test-sse-listener");
         thread.setDaemon(true);
         thread.start();
 
-        // Wait for expected events (or timeout)
         latch.await(5, TimeUnit.SECONDS);
 
         listener.stop();
@@ -80,21 +73,20 @@ class IndexerSseListenerTests {
         return captured;
     }
 
-    /** Runs the listener and expects zero events to arrive within a short window. */
-    private List<IndexerSseListener.IndexerEvent> runListenerExpectingNone(String rawSse)
+    private List<SseEvent> runListenerExpectingNone(String rawSse)
             throws InterruptedException {
-        List<IndexerSseListener.IndexerEvent> captured = new ArrayList<>();
+        List<SseEvent> captured = new ArrayList<>();
 
         Stream<String> lines = Arrays.stream(rawSse.split("\n", -1));
         FakeSseHttpClient fake = new FakeSseHttpClient(200, lines);
 
-        IndexerSseListener listener = new IndexerSseListener("*", CONFIG, captured::add, fake);
+        IndexerSseListener listener = new IndexerSseListener(
+                "*", new IndexerConfigManager(CONFIG), captured::add, new HttpClientWrapper(fake));
 
         Thread thread = new Thread(listener, "test-sse-listener");
         thread.setDaemon(true);
         thread.start();
 
-        // Give the listener time to process and produce no events
         Thread.sleep(200);
 
         listener.stop();
@@ -112,10 +104,10 @@ class IndexerSseListenerTests {
     void reviewCreated_parsedCorrectly() throws InterruptedException {
         String sse = "id: 1\nevent: review.created\ndata: {\"review_id\":\"r1\",\"repository\":\"owner/repo\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
-        IndexerSseListener.IndexerEvent e = events.get(0);
+        SseEvent e = events.get(0);
         assertEquals("review.created", e.eventType());
         assertEquals("r1", e.reviewId());
         assertEquals("owner/repo", e.repository());
@@ -127,7 +119,7 @@ class IndexerSseListenerTests {
     void reviewUpdated_parsedCorrectly() throws InterruptedException {
         String sse = "id: 2\nevent: review.updated\ndata: {\"review_id\":\"r2\",\"repository\":\"owner/repo\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
         assertEquals("review.updated", events.get(0).eventType());
@@ -147,10 +139,10 @@ class IndexerSseListenerTests {
 
                 """;
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
-        IndexerSseListener.IndexerEvent e = events.get(0);
+        SseEvent e = events.get(0);
         assertEquals("branch.updated", e.eventType());
         assertEquals("r1", e.reviewId());
         assertEquals("owner/repo", e.repository());
@@ -167,12 +159,35 @@ class IndexerSseListenerTests {
 
                 """;
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
         assertEquals("branch.deleted", events.get(0).eventType());
         assertEquals("feature/old", events.get(0).branchName());
         assertNull(events.get(0).repositoryUrl());
+    }
+
+    // -------------------------------------------------------------------------
+    // comment.* events
+    // -------------------------------------------------------------------------
+
+    @Test
+    void commentAdded_parsedCorrectly() throws InterruptedException {
+        String sse = """
+                id: 5
+                event: comment.added
+                data: {"review_id":"r1","repository_url":"https://github.com/owner/repo.git","comment_id":"c1"}
+
+                """;
+
+        List<SseEvent> events = runListener(sse, 1);
+
+        assertEquals(1, events.size());
+        SseEvent e = events.get(0);
+        assertEquals("comment.added", e.eventType());
+        assertEquals("r1", e.reviewId());
+        assertEquals("https://github.com/owner/repo.git", e.repositoryUrl());
+        assertEquals("c1", e.commentId());
     }
 
     // -------------------------------------------------------------------------
@@ -196,7 +211,7 @@ class IndexerSseListenerTests {
 
                 """;
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 3);
+        List<SseEvent> events = runListener(sse, 3);
 
         assertEquals(3, events.size());
         assertEquals("review.created", events.get(0).eventType());
@@ -213,11 +228,9 @@ class IndexerSseListenerTests {
 
     @Test
     void cursor_updatedFromIdField() throws InterruptedException {
-        // We cannot inspect the cursor directly (it's package-private state), but we can
-        // verify the listener does not throw when id fields are present and numeric.
         String sse = "id: 42\nevent: review.created\ndata: {\"review_id\":\"r1\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
         assertEquals(1, events.size());
     }
 
@@ -225,8 +238,7 @@ class IndexerSseListenerTests {
     void cursor_nonNumericId_ignoredGracefully() throws InterruptedException {
         String sse = "id: not-a-number\nevent: review.created\ndata: {\"review_id\":\"r1\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
-        // Event should still be dispatched even though the id is non-numeric
+        List<SseEvent> events = runListener(sse, 1);
         assertEquals(1, events.size());
         assertEquals("r1", events.get(0).reviewId());
     }
@@ -237,11 +249,9 @@ class IndexerSseListenerTests {
 
     @Test
     void eventType_inDataPayload_usedWhenNoEventLine() throws InterruptedException {
-        // When the SSE frame has no "event:" line the listener falls back to the
-        // "type" field inside the JSON data.
         String sse = "id: 5\ndata: {\"type\":\"review.created\",\"review_id\":\"r1\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
         assertEquals("review.created", events.get(0).eventType());
@@ -254,11 +264,10 @@ class IndexerSseListenerTests {
 
     @Test
     void malformedJsonData_frameSkipped_noException() throws InterruptedException {
-        // A malformed data line followed by a valid one: only the valid event should arrive.
         String sse = "id: 1\nevent: review.created\ndata: {{{INVALID_JSON\n\n" +
                      "id: 2\nevent: review.updated\ndata: {\"review_id\":\"r2\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListener(sse, 1);
+        List<SseEvent> events = runListener(sse, 1);
 
         assertEquals(1, events.size());
         assertEquals("review.updated", events.get(0).eventType());
@@ -267,21 +276,18 @@ class IndexerSseListenerTests {
 
     @Test
     void frameWithNoData_noEventDispatched() throws InterruptedException {
-        // A frame with only id/event but no data line should not dispatch anything.
         String sse = "id: 1\nevent: review.created\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListenerExpectingNone(sse);
+        List<SseEvent> events = runListenerExpectingNone(sse);
 
         assertTrue(events.isEmpty(), "Frame without data should produce no events");
     }
 
     @Test
     void frameWithNullEventTypeAndNoTypeInData_frameSkipped() throws InterruptedException {
-        // If neither the SSE "event:" line nor the JSON "type" field is present, the frame
-        // is dropped.
         String sse = "id: 1\ndata: {\"review_id\":\"r1\"}\n\n";
 
-        List<IndexerSseListener.IndexerEvent> events = runListenerExpectingNone(sse);
+        List<SseEvent> events = runListenerExpectingNone(sse);
 
         assertTrue(events.isEmpty());
     }
@@ -292,10 +298,11 @@ class IndexerSseListenerTests {
 
     @Test
     void non200Response_noEventsDispatched_listenerDoesNotCrash() throws InterruptedException {
-        List<IndexerSseListener.IndexerEvent> captured = new ArrayList<>();
+        List<SseEvent> captured = new ArrayList<>();
 
         FakeSseHttpClient fake = new FakeSseHttpClient(503, Stream.of());
-        IndexerSseListener listener = new IndexerSseListener("*", CONFIG, captured::add, fake);
+        IndexerSseListener listener = new IndexerSseListener(
+                "*", new IndexerConfigManager(CONFIG), captured::add, new HttpClientWrapper(fake));
 
         Thread thread = new Thread(listener, "test-sse-non200");
         thread.setDaemon(true);
@@ -311,10 +318,11 @@ class IndexerSseListenerTests {
 
     @Test
     void response410_cursorReset_noEventsDispatched() throws InterruptedException {
-        List<IndexerSseListener.IndexerEvent> captured = new ArrayList<>();
+        List<SseEvent> captured = new ArrayList<>();
 
         FakeSseHttpClient fake = new FakeSseHttpClient(410, Stream.of());
-        IndexerSseListener listener = new IndexerSseListener("*", CONFIG, captured::add, fake);
+        IndexerSseListener listener = new IndexerSseListener(
+                "*", new IndexerConfigManager(CONFIG), captured::add, new HttpClientWrapper(fake));
 
         Thread thread = new Thread(listener, "test-sse-410");
         thread.setDaemon(true);
@@ -332,10 +340,6 @@ class IndexerSseListenerTests {
     // Fake HTTP infrastructure
     // -------------------------------------------------------------------------
 
-    /**
-     * {@link HttpClient} stub that returns a pre-built SSE response as a
-     * {@code Stream<String>} body.
-     */
     static class FakeSseHttpClient extends HttpClient {
         private final int status;
         private final Stream<String> lines;
@@ -378,7 +382,6 @@ class IndexerSseListenerTests {
         }
     }
 
-    /** Minimal {@link HttpResponse} carrying a fixed status and body. */
     static class FakeHttpResponse<T> implements HttpResponse<T> {
         private final int statusCode;
         private final T body;

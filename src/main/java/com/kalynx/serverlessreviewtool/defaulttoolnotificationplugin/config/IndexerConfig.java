@@ -1,4 +1,4 @@
-package com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin;
+package com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config;
 
 import java.util.List;
 

@@ -1,4 +1,4 @@
-package com.kalynx.serverlessreviewtool.plugins.defaults.defaultnotificationplugin;
+package com.kalynx.serverlessreviewtool.defaulttoolnotificationplugin.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -13,30 +13,37 @@ import java.util.List;
 /**
  * Persists {@link IndexerConfig} to the plugin configuration file.
  *
- * <p>The file path is resolved using the same rules as {@link IndexerConfigLoader}.
+ * <p>The file path is resolved via {@link IndexerConfigLoader#resolveConfigPath()} so
+ * loader and saver always target the same file.
  */
 public class IndexerConfigSaver {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IndexerConfigSaver.class);
-    private static final String CONFIG_PROPERTY = "srt.notification.config";
-    private static final String DEFAULT_CONFIG_NAME = "repositories.json";
 
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+    private final IndexerConfigLoader loader;
+
+    public IndexerConfigSaver() {
+        this(new IndexerConfigLoader());
+    }
+
+    IndexerConfigSaver(IndexerConfigLoader loader) {
+        this.loader = loader;
+    }
 
     /**
-     * Saves the given {@link IndexerConfig} to disk.
+     * Persists {@code config} to disk.
      *
-     * @param config the configuration to persist
+     * @param config the configuration to save
      * @throws IOException if the file cannot be written
      */
     public void save(IndexerConfig config) throws IOException {
-        JsonConfig data = toJsonConfig(config);
-        Path configPath = resolveConfigPath();
-        Files.writeString(configPath, gson.toJson(data));
+        Path configPath = loader.resolveConfigPath();
+        Files.writeString(configPath, gson.toJson(toJson(config)));
         LOGGER.info("Saved indexer configuration to: {}", configPath);
     }
 
-    private JsonConfig toJsonConfig(IndexerConfig config) {
+    private JsonConfig toJson(IndexerConfig config) {
         JsonConfig data = new JsonConfig();
         data.indexerUrl = config.indexerUrl();
         data.bearerToken = config.bearerToken();
@@ -51,11 +58,6 @@ public class IndexerConfigSaver {
         return data;
     }
 
-    private Path resolveConfigPath() {
-        String configured = System.getProperty(CONFIG_PROPERTY, DEFAULT_CONFIG_NAME);
-        return Path.of(configured).toAbsolutePath().normalize();
-    }
-
     private static class JsonConfig {
         String indexerUrl;
         String bearerToken;
@@ -67,4 +69,3 @@ public class IndexerConfigSaver {
         String location;
     }
 }
-
